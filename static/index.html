@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VoltGuard — AI Ops Copilot for IoT Energy Fleets</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d;
+    --text: #e6edf3; --dim: #8b949e;
+    --volt: #ffd60a; --ok: #3fb950; --warn: #d29922; --crit: #f85149;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; align-items: baseline; gap: 12px; padding: 18px 24px; border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 20px; color: var(--volt); letter-spacing: 0.5px; }
+  header .sub { color: var(--dim); }
+  .brain { margin-left: auto; font-size: 12px; color: var(--dim); border: 1px solid var(--border); border-radius: 20px; padding: 3px 12px; }
+  .brain b { color: var(--volt); }
+  main { display: grid; grid-template-columns: 1fr 380px; gap: 20px; padding: 20px 24px; max-width: 1400px; margin: 0 auto; }
+  @media (max-width: 980px) { main { grid-template-columns: 1fr; } }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: var(--dim); margin-bottom: 10px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+  .card.incident { border-color: var(--crit); box-shadow: 0 0 12px rgba(248, 81, 73, 0.15); }
+  .card .id { font-weight: 600; }
+  .card .kind { color: var(--dim); font-size: 12px; }
+  .badge { float: right; font-size: 11px; border-radius: 12px; padding: 2px 10px; }
+  .badge.healthy { background: rgba(63,185,80,.15); color: var(--ok); }
+  .badge.incident { background: rgba(248,81,73,.15); color: var(--crit); }
+  .metrics { display: flex; gap: 14px; margin: 10px 0 6px; font-size: 12px; }
+  .metrics b { display: block; font-size: 15px; }
+  .metrics .z-hot b { color: var(--crit); }
+  canvas { width: 100%; height: 42px; display: block; }
+  .incidents { display: flex; flex-direction: column; gap: 10px; max-height: 78vh; overflow-y: auto; }
+  .inc { background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--warn); border-radius: 8px; padding: 12px; }
+  .inc.critical { border-left-color: var(--crit); }
+  .inc.resolved { opacity: 0.55; border-left-color: var(--ok); }
+  .inc .top { display: flex; gap: 8px; align-items: center; font-weight: 600; margin-bottom: 6px; }
+  .inc .sev { font-size: 11px; text-transform: uppercase; }
+  .inc .sev.warning { color: var(--warn); } .inc .sev.critical { color: var(--crit); }
+  .inc p { color: var(--dim); font-size: 13px; margin: 4px 0; }
+  .inc .action { color: var(--text); }
+  .inc .action::before { content: "⚡ "; color: var(--volt); }
+  .empty { color: var(--dim); border: 1px dashed var(--border); border-radius: 8px; padding: 24px; text-align: center; }
+  footer { color: var(--dim); font-size: 12px; text-align: center; padding: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>⚡ VoltGuard</h1>
+  <span class="sub">AI ops copilot for IoT energy fleets</span>
+  <span class="brain">AI: <b id="brain">—</b> · <span id="clock"></span></span>
+</header>
+<main>
+  <section>
+    <h2>Fleet</h2>
+    <div class="grid" id="fleet"></div>
+  </section>
+  <section>
+    <h2>AI incident feed</h2>
+    <div class="incidents" id="incidents"></div>
+  </section>
+</main>
+<footer>Simulated fleet · detection + diagnosis run locally · Gemini optional</footer>
+
+<script>
+const hist = {};            // deviceId -> metric -> [values]
+const fmt = {
+  voltage: v => v.toFixed(1) + "V",
+  temperature: v => v.toFixed(1) + "°C",
+  load: v => v.toFixed(1) + "kW",
+};
+
+function spark(canvas, values, hot) {
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width = canvas.offsetWidth * 2;
+  const h = canvas.height = 84;
+  ctx.clearRect(0, 0, w, h);
+  if (values.length < 2) return;
+  const min = Math.min(...values), max = Math.max(...values), span = (max - min) || 1;
+  ctx.beginPath();
+  values.forEach((v, i) => {
+    const x = i / (values.length - 1) * w;
+    const y = h - 8 - (v - min) / span * (h - 16);
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  });
+  ctx.strokeStyle = hot ? "#f85149" : "#ffd60a";
+  ctx.lineWidth = 2.5;
+  ctx.stroke();
+}
+
+function render(s) {
+  document.getElementById("brain").textContent = s.ai_brain;
+  document.getElementById("clock").textContent =
+    "uptime " + Math.floor((Date.now() / 1000 - s.started_at) / 60) + "m";
+
+  const fleet = document.getElementById("fleet");
+  fleet.innerHTML = "";
+  for (const d of Object.values(s.devices)) {
+    hist[d.id] = hist[d.id] || {};
+    const card = document.createElement("div");
+    card.className = "card " + (d.status === "incident" ? "incident" : "");
+    const metricsHtml = Object.keys(fmt).map(m => {
+      const z = d.latest[m + "_z"] || 0;
+      const hot = Math.abs(z) >= 3;
+      (hist[d.id][m] = hist[d.id][m] || []).push(d.latest[m] ?? 0);
+      if (hist[d.id][m].length > 120) hist[d.id][m].shift();
+      return `<div class="metrics ${hot ? "z-hot" : ""}"><div>${m}<b>${fmt[m](d.latest[m] ?? 0)}</b>z ${z.toFixed(1)}</div></div>`;
+    }).join("");
+    card.innerHTML = `
+      <span class="badge ${d.status}">${d.status}</span>
+      <div class="id">${d.id}</div><div class="kind">${d.kind} · ${d.site}</div>
+      <div class="metrics-wrap">${metricsHtml}</div>`;
+    fleet.appendChild(card);
+    card.querySelectorAll(".metrics > div").forEach((div, i) => {
+      const m = Object.keys(fmt)[i];
+      let cv = div.querySelector("canvas");
+      if (!cv) { cv = document.createElement("canvas"); div.appendChild(cv); }
+      spark(cv, hist[d.id][m], Math.abs(d.latest[m + "_z"] || 0) >= 3);
+    });
+  }
+
+  const inc = document.getElementById("incidents");
+  inc.innerHTML = s.incidents.length ? "" : '<div class="empty">No incidents — fleet nominal. Faults are injected randomly (~1% of ticks), keep this page open.</div>';
+  for (const i of s.incidents) {
+    const el = document.createElement("div");
+    el.className = "inc " + i.severity + " " + i.status;
+    el.innerHTML = `
+      <div class="top">${i.id} · ${i.device} · ${i.metric} = ${i.value}
+        <span class="sev ${i.severity}">${i.severity}</span>
+        <span style="margin-left:auto;color:var(--dim);font-weight:400">${i.status}</span></div>
+      <p>${i.diagnosis}</p>
+      <p class="action">${i.action}</p>`;
+    inc.appendChild(el);
+  }
+}
+
+async function poll() {
+  try { render(await (await fetch("/api/state")).json()); } catch (e) { /* retry */ }
+}
+poll();
+setInterval(poll, 2000);
+</script>
+</body>
+</html>
